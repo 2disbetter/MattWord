@@ -2,8 +2,8 @@
 #define SPELLCHECKER_H
 
 #include <QSyntaxHighlighter>
-#include <QProcess>
 #include <QTimer>
+#include <QProcess>
 #include <QHash>
 #include <QSet>
 
@@ -26,8 +26,9 @@ private:
     bool isWordMisspelled(const QStringList &words, QHash<QString, bool> &results);
     QTimer *debounceTimer;
     QHash<QString, bool> spellCache;
-    QSet<int> modifiedBlocks; // Track modified block numbers
-    QMetaObject::Connection contentsChangedConnection; // Store the connection for enabling/disabling
+    QSet<int> modifiedBlocks;
+    QMetaObject::Connection contentsChangedConnection;
+    bool spellCheckingEnabled = true; // New flag to track spell-checking state
 };
 
 #endif // SPELLCHECKER_H
