@@ -12,11 +12,49 @@
 #include <QApplication>
 #include <QElapsedTimer>
 #include <QInputDialog>
+#include <QKeyEvent>
+
+MyTextEdit::MyTextEdit(QWidget *parent) : QTextEdit(parent) {
+    setAcceptRichText(true);
+    setAutoFormatting(QTextEdit::AutoNone);
+}
+
+void MyTextEdit::setMyViewportMargins(int left, int top, int right, int bottom) {
+    setViewportMargins(left, top, right, bottom);
+}
+
+void MyTextEdit::paintEvent(QPaintEvent *event) {
+    QElapsedTimer timer;
+    timer.start();
+    QTextEdit::paintEvent(event);
+    // qDebug() << "paintEvent took:" << timer.elapsed() << "ms";
+}
+
+bool MyTextEdit::viewportEvent(QEvent *event) {
+    if (event->type() == QEvent::UpdateRequest) {
+        // qDebug() << "Viewport update requested";
+    }
+    return QTextEdit::viewportEvent(event);
+}
+
+void MyTextEdit::keyPressEvent(QKeyEvent *event) {
+    QTextEdit::keyPressEvent(event);
+    if (event->key() == Qt::Key_Space) {
+        // Trigger spell check for the current block
+        QTextBlock block = textCursor().block();
+        if (block.isValid()) {
+            SpellHighlighter *highlighter = qobject_cast<SpellHighlighter*>(document()->findChild<QSyntaxHighlighter*>());
+            if (highlighter) {
+                highlighter->rehighlightBlock(block);
+            }
+        }
+    }
+}
 
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     editor = new MyTextEdit(this);
     editor->setAcceptRichText(true);
-    editor->setAutoFormatting(QTextEdit::AutoNone); // Minimize layout updates
+    editor->setAutoFormatting(QTextEdit::AutoNone);
     spellHighlighter = new SpellHighlighter(editor->document());
     setCentralWidget(editor);
 
@@ -92,8 +130,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     toolBar->addSeparator();
     toolBar->addAction(imageAct);
 
-    setWindowTitle(tr("WordEditor"));
+    setWindowTitle(tr("Qt Rich Text Editor"));
     resize(800, 600);
+
     applyPageSetup();
     setLightTheme();
 }
@@ -103,7 +142,6 @@ MainWindow::~MainWindow() {}
 void MainWindow::newFile() {
     editor->clear();
     currentFilePath.clear();
-    applyPageSetup();
 }
 
 void MainWindow::openFile() {
@@ -111,15 +149,13 @@ void MainWindow::openFile() {
     if (filePath.isEmpty()) return;
     QFile file(filePath);
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        QMessageBox::warning(this, tr("Open Error"), tr("Cannot open file for reading."));
+        QMessageBox::warning(this, tr("Error"), tr("Cannot open file: ") + file.errorString());
         return;
     }
     QTextStream in(&file);
-    editor->setHtml(in.readAll());
-    file.close();
+    QString html = in.readAll();
+    editor->setHtml(html);
     currentFilePath = filePath;
-    setWindowTitle(QFileInfo(filePath).fileName());
-    spellHighlighter->rehighlight();
 }
 
 void MainWindow::saveFile() {
@@ -131,49 +167,21 @@ void MainWindow::saveFile() {
 }
 
 void MainWindow::saveAsFile() {
-    QString filePath = QFileDialog::getSaveFileName(this, tr("Save As"), "", tr("HTML Files (*.html);;All Files (*)"));
+    QString filePath = QFileDialog::getSaveFileName(this, tr("Save As"), "", tr("HTML Files (*.html *.htm);;All Files (*)"));
     if (filePath.isEmpty()) return;
     saveToFile(filePath);
+    currentFilePath = filePath;
 }
 
 void MainWindow::saveToFile(const QString &filePath) {
     QFile file(filePath);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
-        QMessageBox::warning(this, tr("Save Error"), tr("Cannot open file for writing."));
+        QMessageBox::warning(this, tr("Error"), tr("Cannot save file: ") + file.errorString());
         return;
     }
     QTextStream out(&file);
-
-    // Get the HTML content from the editor
     QString html = editor->toHtml();
-
-    // Process images to embed as base64 data URLs
-    QTextDocument *doc = editor->document();
-    QRegularExpression imgRegex("<img\\s+[^>]*src=\"([^\"]+)\"[^>]*>");
-    QRegularExpressionMatchIterator it = imgRegex.globalMatch(html);
-    while (it.hasNext()) {
-        QRegularExpressionMatch match = it.next();
-        QString src = match.captured(1); // The src attribute value
-        QUrl srcUrl(src);
-        QVariant resource = doc->resource(QTextDocument::ImageResource, srcUrl);
-        if (resource.isValid() && resource.type() == QVariant::ByteArray) {
-            QByteArray imageData = resource.toByteArray();
-            // Determine image format (default to PNG if unknown)
-            QString format = QFileInfo(src).suffix().toLower();
-            if (format.isEmpty() || !QImageReader::supportedImageFormats().contains(format.toUtf8())) {
-                format = "png";
-            }
-            // Convert to base64
-            QString base64 = QString("data:image/%1;base64,%2").arg(format, QString(imageData.toBase64()));
-            // Replace the original src with the base64 data URL
-            html.replace(match.captured(0), match.captured(0).replace(src, base64));
-        }
-    }
-
     out << html;
-    file.close();
-    currentFilePath = filePath;
-    setWindowTitle(QFileInfo(filePath).fileName());
 }
 
 void MainWindow::undo() {
@@ -194,7 +202,6 @@ void MainWindow::copy() {
 
 void MainWindow::paste() {
     editor->paste();
-    spellHighlighter->rehighlight();
 }
 
 void MainWindow::bold() {
@@ -230,7 +237,7 @@ void MainWindow::insertImage() {
 
     // Prompt user for width selection
     QStringList options;
-    options << "200" << "400" << "600";
+    options << "200" << "300" << "400";
     bool ok;
     QString widthStr = QInputDialog::getItem(this, tr("Select Image Width"), tr("Width (px):"), options, 0, false, &ok);
     if (!ok || widthStr.isEmpty()) {
@@ -279,7 +286,16 @@ void MainWindow::print() {
     if (dialog.exec() != QDialog::Accepted) return;
     printer.setPageSize(QPageSize(pageSizeId));
     printer.setPageMargins(QMarginsF(leftMargin / 72.0, topMargin / 72.0, rightMargin / 72.0, bottomMargin / 72.0), QPageLayout::Inch);
+
+    // Temporarily disable spell highlighting for printing
+    spellHighlighter->disableSpellChecking();
+    // spellHighlighter->rehighlight();  // Remove existing underlines
+
     editor->print(&printer);
+
+    // Re-enable spell highlighting
+    spellHighlighter->enableSpellChecking();
+    // spellHighlighter->rehighlight();  // Restore underlines on screen
 }
 
 void MainWindow::pageSetup() {
@@ -335,7 +351,6 @@ void MainWindow::pageSetup() {
 }
 
 void MainWindow::applyPageSetup() {
-    // Remove setPageSize to reduce layout overhead; only needed for printing
     editor->setMyViewportMargins(qRound(leftMargin), qRound(topMargin), qRound(rightMargin), qRound(bottomMargin));
 }
 
