@@ -289,13 +289,11 @@ void MainWindow::print() {
 
     // Temporarily disable spell highlighting for printing
     spellHighlighter->disableSpellChecking();
-    // spellHighlighter->rehighlight();  // Remove existing underlines
 
     editor->print(&printer);
 
     // Re-enable spell highlighting
     spellHighlighter->enableSpellChecking();
-    // spellHighlighter->rehighlight();  // Restore underlines on screen
 }
 
 void MainWindow::pageSetup() {
