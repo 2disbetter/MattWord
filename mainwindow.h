@@ -28,30 +28,19 @@
 #include <QUuid>
 #include "spellchecker.h"
 #include <QElapsedTimer>
+#include <QKeyEvent>
 
-// Subclass QTextEdit to expose viewport margins and log paint/update events
+// Subclass QTextEdit to expose viewport margins, log paint/update events, and handle key presses
 class MyTextEdit : public QTextEdit {
     Q_OBJECT
 public:
-    MyTextEdit(QWidget *parent = nullptr) : QTextEdit(parent) {}
-    void setMyViewportMargins(int left, int top, int right, int bottom) {
-        setViewportMargins(left, top, right, bottom);
-    }
+    MyTextEdit(QWidget *parent = nullptr);
+    void setMyViewportMargins(int left, int top, int right, int bottom);
 
 protected:
-    void paintEvent(QPaintEvent *event) override {
-        QElapsedTimer timer;
-        timer.start();
-        QTextEdit::paintEvent(event);
-        // qDebug() << "paintEvent took:" << timer.elapsed() << "ms";
-    }
-
-    bool viewportEvent(QEvent *event) override {
-        if (event->type() == QEvent::UpdateRequest) {
-            // qDebug() << "Viewport update requested";
-        }
-        return QTextEdit::viewportEvent(event);
-    }
+    void paintEvent(QPaintEvent *event) override;
+    bool viewportEvent(QEvent *event) override;
+    void keyPressEvent(QKeyEvent *event) override;
 };
 
 class MainWindow : public QMainWindow {
