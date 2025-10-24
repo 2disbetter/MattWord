@@ -9,7 +9,8 @@
 SpellHighlighter::SpellHighlighter(QTextDocument *parent) : QSyntaxHighlighter(parent) {
     debounceTimer = new QTimer(this);
     debounceTimer->setSingleShot(true);
-    debounceTimer->setInterval(1000); // 1-second debounce for responsiveness
+    debounceTimer->setInterval(500);
+    connect(debounceTimer, &QTimer::timeout, this, &SpellHighlighter::performSpellCheck);
     contentsChangedConnection = connect(parent, &QTextDocument::contentsChanged, this, &SpellHighlighter::onTextChanged);
     connect(parent, &QTextDocument::contentsChange, this, &SpellHighlighter::onContentsChange);
 
@@ -25,7 +26,6 @@ SpellHighlighter::SpellHighlighter(QTextDocument *parent) : QSyntaxHighlighter(p
         QString output = QString::fromUtf8(testAspell.readAllStandardOutput()).trimmed();
         QString error = QString::fromUtf8(testAspell.readAllStandardError()).trimmed();
         if (output.isEmpty() && !error.isEmpty()) {
-            // qDebug() << "Aspell test error:" << error;
             QMessageBox::warning(nullptr, tr("Spell Check Error"),
                 tr("Aspell dictionary missing: ") + error + tr("\nInstall aspell-en to fix."));
         }
@@ -33,16 +33,23 @@ SpellHighlighter::SpellHighlighter(QTextDocument *parent) : QSyntaxHighlighter(p
 }
 
 void SpellHighlighter::disableSpellChecking() {
+    spellCheckingEnabled = false;
     QObject::disconnect(contentsChangedConnection);
+    rehighlight(); // Force rehighlight to clear underlines
 }
 
 void SpellHighlighter::enableSpellChecking() {
+    spellCheckingEnabled = true;
     contentsChangedConnection = QObject::connect(document(), &QTextDocument::contentsChanged,
                                                 this, &SpellHighlighter::onTextChanged);
+    rehighlight(); // Force rehighlight to restore underlines
 }
 
 void SpellHighlighter::onTextChanged() {
-    debounceTimer->start();
+    spellCache.clear();
+    if (spellCheckingEnabled) {
+        debounceTimer->start();
+    }
 }
 
 void SpellHighlighter::onContentsChange(int from, int charsRemoved, int charsAdded) {
@@ -56,16 +63,29 @@ void SpellHighlighter::onContentsChange(int from, int charsRemoved, int charsAdd
     for (QTextBlock block = startBlock; block.isValid() && block.blockNumber() <= endBlock.blockNumber(); block = block.next()) {
         modifiedBlocks.insert(block.blockNumber());
     }
+
+    // Check if a space was added
+    QString text = document()->toPlainText();
+    if (spellCheckingEnabled && charsAdded == 1 && from < text.length() && text[from] == ' ') {
+        QTextBlock block = document()->findBlock(from);
+        if (block.isValid()) {
+            rehighlightBlock(block);
+        }
+    } else if (spellCheckingEnabled) {
+        debounceTimer->start();
+    }
 }
 
 void SpellHighlighter::performSpellCheck() {
+    if (!spellCheckingEnabled) return;
+
     QElapsedTimer timer;
     timer.start();
 
     for (int blockNumber : modifiedBlocks) {
         QTextBlock block = document()->findBlockByNumber(blockNumber);
         if (block.isValid()) {
-            highlightBlock(block.text());
+            rehighlightBlock(block);
         }
     }
 
@@ -83,13 +103,24 @@ void SpellHighlighter::highlightBlock(const QString &text) {
     QTextCharFormat misspelledFormat;
     misspelledFormat.setUnderlineStyle(QTextCharFormat::SpellCheckUnderline);
     misspelledFormat.setUnderlineColor(Qt::red);
+    QTextCharFormat clearFormat;
+    clearFormat.setUnderlineStyle(QTextCharFormat::NoUnderline);
+
+    // Always clear existing formatting
+    setFormat(0, plainText.length(), clearFormat);
+
+    // Skip spell-checking if disabled
+    if (!spellCheckingEnabled) {
+        // qDebug() << "Spell checking disabled, skipping highlight for block" << currentBlock().blockNumber();
+        return;
+    }
 
     QStringList wordsToCheck;
     QHash<QString, QPair<int, int>> wordPositions;
     while (i.hasNext()) {
         QRegularExpressionMatch match = i.next();
         QString word = match.captured();
-        if (!spellCache.contains(word) && word.length() >= 2 && !word.contains(QRegularExpression("[0-9]"))) {
+        if (word.length() >= 2 && !word.contains(QRegularExpression("[0-9]"))) {
             wordsToCheck.append(word);
             wordPositions[word] = {match.capturedStart(), match.capturedLength()};
         }
@@ -99,8 +130,10 @@ void SpellHighlighter::highlightBlock(const QString &text) {
         QHash<QString, bool> results;
         isWordMisspelled(wordsToCheck, results);
         for (const QString &word : wordsToCheck) {
-            spellCache.insert(word, results.value(word, false));
-            if (results.value(word, false)) {
+            bool isMisspelled = results.value(word, false);
+            spellCache.insert(word, isMisspelled);
+            // qDebug() << "Word:" << word << "Misspelled:" << isMisspelled;
+            if (isMisspelled) {
                 auto [start, length] = wordPositions[word];
                 setFormat(start, length, misspelledFormat);
             }
