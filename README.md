@@ -10,4 +10,4 @@ The executable is under 3 megs and the whole thing runs in most Linux setups und
 MattWord has QT6 for dependencies and if you want spellchecking you will need aspell and aspell-en. This has been tested on Omarchy and Arch Linux. Should work on other distros provided the dependencies can be met. 
 
 Spellchecking will tell you that a word is misspelled but will not suggest the fix or new words. This is on purpose and helps to keep things efficient and quick. 
-Image insertion now allows you to decide how large the image should be in terms of width. (100, 200, and 300 pixels) Large images cause the editor to slow down despite the image being scaled to the width the user selects. For now large images should be avoided. 
+Image insertion now allows you to decide how large the image should be in terms of width. (200, 300, and 400 pixels) Large images cause the editor to slow down despite the image being scaled to the width the user selects. For now large images should be avoided. 
