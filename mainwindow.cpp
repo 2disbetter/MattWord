@@ -13,6 +13,7 @@
 #include <QElapsedTimer>
 #include <QInputDialog>
 #include <QKeyEvent>
+#include <QVariant>
 
 MyTextEdit::MyTextEdit(QWidget *parent) : QTextEdit(parent) {
     setAcceptRichText(true);
@@ -176,12 +177,38 @@ void MainWindow::saveAsFile() {
 void MainWindow::saveToFile(const QString &filePath) {
     QFile file(filePath);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
-        QMessageBox::warning(this, tr("Error"), tr("Cannot save file: ") + file.errorString());
+        QMessageBox::warning(this, tr("Error"), tr("Cannot write file %1").arg(filePath));
         return;
     }
-    QTextStream out(&file);
+
     QString html = editor->toHtml();
+
+    QRegularExpression imgRx("<img\\s+[^>]*src\\s*=\\s*\"(myimage/[^\"]+)\"[^>]*>");
+    QRegularExpressionMatchIterator i = imgRx.globalMatch(html);
+    while (i.hasNext()) {
+        QRegularExpressionMatch match = i.next();
+        QString resourceName = match.captured(1);
+
+        // Load the image data from the document's resource
+        QVariant resource = editor->document()->resource(QTextDocument::ImageResource, QUrl(resourceName));
+        if (resource.typeId() != QMetaType::QByteArray) {
+            qDebug() << "Resource not found or invalid:" << resourceName;
+            continue;
+        }
+
+        QByteArray ba = resource.toByteArray();
+        QString base64 = ba.toBase64();
+
+        // Replace with data URL (PNG since we saved as PNG in insertImage)
+        QString dataUrl = QString("data:image/png;base64,%1").arg(base64);
+        html.replace(match.capturedStart(), match.capturedLength(),
+                     match.captured().replace(match.captured(1), dataUrl));
+    }
+
+    QTextStream out(&file);
     out << html;
+    file.close();
+    currentFilePath = filePath;
 }
 
 void MainWindow::undo() {
