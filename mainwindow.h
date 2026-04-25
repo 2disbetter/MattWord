@@ -27,6 +27,7 @@
 #include <QRegularExpression>
 #include <QUuid>
 #include "spellchecker.h"
+#include "drawingcanvas.h"
 #include <QElapsedTimer>
 #include <QKeyEvent>
 
@@ -64,6 +65,7 @@ private slots:
     void italic();
     void underline();
     void insertImage();
+    void insertDrawing();
     void print();
     void pageSetup();
     void setLightTheme();

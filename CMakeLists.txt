@@ -1,10 +1,3 @@
-# Copyright 2025 2disbetter
-
-DESCRIPTION="A simple, lightweight, Qt-based document editor and word processor application."
-HOMEPAGE="https://github.com/2disbetter/MattWord/"
-
-LICENSE="MIT"
-
 cmake_minimum_required(VERSION 3.5)
 
 project(MattWord LANGUAGES CXX)
@@ -24,6 +17,8 @@ add_executable(MattWord
         mainwindow.cpp
         spellchecker.h
         spellchecker.cpp
+        drawingcanvas.h
+        drawingcanvas.cpp
 )
 
 target_link_libraries(MattWord PRIVATE Qt6::Widgets Qt6::PrintSupport)

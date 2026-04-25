@@ -1,4 +1,5 @@
 #include "mainwindow.h"
+#include "drawingcanvas.h"
 #include <QFile>
 #include <QTextStream>
 #include <QDir>
@@ -41,7 +42,6 @@ bool MyTextEdit::viewportEvent(QEvent *event) {
 void MyTextEdit::keyPressEvent(QKeyEvent *event) {
     QTextEdit::keyPressEvent(event);
     if (event->key() == Qt::Key_Space) {
-        // Trigger spell check for the current block
         QTextBlock block = textCursor().block();
         if (block.isValid()) {
             SpellHighlighter *highlighter = qobject_cast<SpellHighlighter*>(document()->findChild<QSyntaxHighlighter*>());
@@ -59,7 +59,6 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     spellHighlighter = new SpellHighlighter(editor->document());
     setCentralWidget(editor);
 
-    // Connect document layout changed signal for debugging
     connect(editor->document(), &QTextDocument::documentLayoutChanged, this, &MainWindow::onDocumentLayoutChanged);
 
     // File Menu
@@ -109,6 +108,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     // Insert Menu
     QMenu *insertMenu = menuBar()->addMenu(tr("&Insert"));
     QAction *imageAct = insertMenu->addAction(tr("I&mage"), this, &MainWindow::insertImage);
+    QAction *drawingAct = insertMenu->addAction(tr("&Drawing"), this, &MainWindow::insertDrawing);
 
     // View Menu for theme selection
     QMenu *viewMenu = menuBar()->addMenu(tr("&View"));
@@ -130,6 +130,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     toolBar->addAction(underlineAct);
     toolBar->addSeparator();
     toolBar->addAction(imageAct);
+    toolBar->addAction(drawingAct);
 
     setWindowTitle(tr("Qt Rich Text Editor"));
     resize(800, 600);
@@ -146,8 +147,10 @@ void MainWindow::newFile() {
 }
 
 void MainWindow::openFile() {
-    QString filePath = QFileDialog::getOpenFileName(this, tr("Open File"), "", tr("HTML Files (*.html *.htm);;All Files (*)"));
+    QString filePath = QFileDialog::getOpenFileName(
+        this, tr("Open File"), "", tr("HTML Files (*.html *.htm);;All Files (*)"));
     if (filePath.isEmpty()) return;
+
     QFile file(filePath);
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
         QMessageBox::warning(this, tr("Error"), tr("Cannot open file: ") + file.errorString());
@@ -155,7 +158,72 @@ void MainWindow::openFile() {
     }
     QTextStream in(&file);
     QString html = in.readAll();
+    file.close();
+
+    // ----------------------------------------------------------------
+    // Pre-process: Qt's setHtml() does NOT support data: URIs in <img>
+    // src attributes — it renders the raw URI as text instead of an
+    // image.  We therefore:
+    //   1. Find every data URI in the HTML.
+    //   2. Replace it with a plain "myimage/..." resource name.
+    //   3. Decode the base64 bytes and keep them in a map.
+    //   4. After setHtml(), register each image as a document resource
+    //      so Qt's layout engine can find and render it.
+    // ----------------------------------------------------------------
+    QHash<QString, QByteArray> imageResources;
+    // Matches:  src="data:image/png;base64,<base64data>"
+    //   cap(1) = format extension ("png", "jpg", …)
+    //   cap(2) = raw base64 string
+    QRegularExpression dataUriRx(
+        "src=\"data:image/([a-zA-Z]+);base64,([^\"]+)\"",
+        QRegularExpression::DotMatchesEverythingOption);
+
+    QRegularExpressionMatchIterator it = dataUriRx.globalMatch(html);
+    QList<QRegularExpressionMatch> matches;
+    while (it.hasNext())
+        matches.append(it.next());
+
+    // Process in reverse so earlier replacements don't shift later offsets
+    int counter = 0;
+    for (int idx = matches.size() - 1; idx >= 0; --idx) {
+        const auto &match = matches[idx];
+        QString fmt  = match.captured(1);               // e.g. "png"
+        QString b64  = match.captured(2);               // raw base64
+
+        QString resourceName =
+            QString("myimage/loaded_%1.%2").arg(counter++).arg(fmt);
+
+        QByteArray ba = QByteArray::fromBase64(b64.toLatin1());
+        imageResources[resourceName] = ba;
+
+        // Replace  src="data:image/png;base64,…"  with  src="myimage/loaded_N.png"
+        html.replace(match.capturedStart(), match.capturedLength(),
+                     QString("src=\"%1\"").arg(resourceName));
+    }
+
+    // Load the (now resource-name-based) HTML
+    spellHighlighter->disableSpellChecking();
+    editor->document()->blockSignals(true);
+    editor->setUpdatesEnabled(false);
+
     editor->setHtml(html);
+
+    // Register every image so the layout engine can render them.
+    // Must happen AFTER setHtml() because setHtml() clears the document.
+    for (auto it2 = imageResources.constBegin(); it2 != imageResources.constEnd(); ++it2) {
+        editor->document()->addResource(
+            QTextDocument::ImageResource, QUrl(it2.key()), it2.value());
+    }
+
+    // Force the layout to re-evaluate now that resources are present
+    editor->document()->markContentsDirty(0, editor->document()->characterCount());
+
+    editor->document()->blockSignals(false);
+    editor->setUpdatesEnabled(true);
+    editor->viewport()->update();
+
+    spellHighlighter->enableSpellChecking();
+
     currentFilePath = filePath;
 }
 
@@ -168,7 +236,8 @@ void MainWindow::saveFile() {
 }
 
 void MainWindow::saveAsFile() {
-    QString filePath = QFileDialog::getSaveFileName(this, tr("Save As"), "", tr("HTML Files (*.html *.htm);;All Files (*)"));
+    QString filePath = QFileDialog::getSaveFileName(
+        this, tr("Save As"), "", tr("HTML Files (*.html *.htm);;All Files (*)"));
     if (filePath.isEmpty()) return;
     saveToFile(filePath);
     currentFilePath = filePath;
@@ -183,26 +252,61 @@ void MainWindow::saveToFile(const QString &filePath) {
 
     QString html = editor->toHtml();
 
-    QRegularExpression imgRx("<img\\s+[^>]*src\\s*=\\s*\"(myimage/[^\"]+)\"[^>]*>");
-    QRegularExpressionMatchIterator i = imgRx.globalMatch(html);
-    while (i.hasNext()) {
-        QRegularExpressionMatch match = i.next();
+    // ----------------------------------------------------------------
+    // Embed every internal image resource as a base64 data URI so the
+    // file is self-contained and images survive a save/reload cycle.
+    //
+    // Two bugs fixed vs. the original code:
+    //
+    //  1. Qt may internally decode a stored QByteArray resource into a
+    //     QImage for rendering.  When we later call document()->resource()
+    //     it may come back as QImage rather than QByteArray.  We handle
+    //     both cases.
+    //
+    //  2. The original code iterated matches *forwards* and then called
+    //     html.replace(offset, len, newText).  Once the first replacement
+    //     changes the string length every subsequent stored offset is
+    //     wrong.  We collect all matches first, then process them in
+    //     *reverse* order so earlier replacements don't shift later ones.
+    // ----------------------------------------------------------------
+    QRegularExpression imgRx(
+        "<img\\s+[^>]*src\\s*=\\s*\"(myimage/[^\"]+)\"[^>]*>");
+
+    QRegularExpressionMatchIterator it = imgRx.globalMatch(html);
+    QList<QRegularExpressionMatch> matches;
+    while (it.hasNext())
+        matches.append(it.next());
+
+    for (int idx = matches.size() - 1; idx >= 0; --idx) {
+        const auto &match = matches[idx];
         QString resourceName = match.captured(1);
 
-        // Load the image data from the document's resource
-        QVariant resource = editor->document()->resource(QTextDocument::ImageResource, QUrl(resourceName));
-        if (resource.typeId() != QMetaType::QByteArray) {
-            qDebug() << "Resource not found or invalid:" << resourceName;
+        QVariant resource = editor->document()->resource(
+            QTextDocument::ImageResource, QUrl(resourceName));
+
+        QByteArray ba;
+        if (resource.typeId() == QMetaType::QByteArray) {
+            // Resource is still in its original encoded form
+            ba = resource.toByteArray();
+        } else if (resource.canConvert<QImage>()) {
+            // Qt decoded it to QImage internally for rendering — re-encode
+            QImage img = resource.value<QImage>();
+            QBuffer buf(&ba);
+            buf.open(QIODevice::WriteOnly);
+            img.save(&buf, "PNG");
+            buf.close();
+        } else {
+            qDebug() << "saveToFile: resource not found or unknown type:" << resourceName;
             continue;
         }
 
-        QByteArray ba = resource.toByteArray();
-        QString base64 = ba.toBase64();
+        QString base64  = QString::fromLatin1(ba.toBase64());
+        QString dataUrl = "data:image/png;base64," + base64;
 
-        // Replace with data URL (PNG since we saved as PNG in insertImage)
-        QString dataUrl = QString("data:image/png;base64,%1").arg(base64);
-        html.replace(match.capturedStart(), match.capturedLength(),
-                     match.captured().replace(match.captured(1), dataUrl));
+        // Splice the data URI into the tag in-place
+        QString newTag = match.captured();
+        newTag.replace(resourceName, dataUrl);
+        html.replace(match.capturedStart(), match.capturedLength(), newTag);
     }
 
     QTextStream out(&file);
@@ -211,25 +315,11 @@ void MainWindow::saveToFile(const QString &filePath) {
     currentFilePath = filePath;
 }
 
-void MainWindow::undo() {
-    editor->undo();
-}
-
-void MainWindow::redo() {
-    editor->redo();
-}
-
-void MainWindow::cut() {
-    editor->cut();
-}
-
-void MainWindow::copy() {
-    editor->copy();
-}
-
-void MainWindow::paste() {
-    editor->paste();
-}
+void MainWindow::undo()  { editor->undo(); }
+void MainWindow::redo()  { editor->redo(); }
+void MainWindow::cut()   { editor->cut(); }
+void MainWindow::copy()  { editor->copy(); }
+void MainWindow::paste() { editor->paste(); }
 
 void MainWindow::bold() {
     QTextCharFormat fmt;
@@ -253,7 +343,8 @@ void MainWindow::insertImage() {
     QElapsedTimer timer;
     timer.start();
 
-    QString imagePath = QFileDialog::getOpenFileName(this, tr("Insert Image"), "", tr("Image Files (*.png *.jpg *.bmp)"));
+    QString imagePath = QFileDialog::getOpenFileName(
+        this, tr("Insert Image"), "", tr("Image Files (*.png *.jpg *.bmp)"));
     if (imagePath.isEmpty()) return;
 
     QImage image(imagePath);
@@ -262,23 +353,17 @@ void MainWindow::insertImage() {
         return;
     }
 
-    // Prompt user for width selection
     QStringList options;
     options << "200" << "300" << "400";
     bool ok;
-    QString widthStr = QInputDialog::getItem(this, tr("Select Image Width"), tr("Width (px):"), options, 0, false, &ok);
-    if (!ok || widthStr.isEmpty()) {
-        return;
-    }
+    QString widthStr = QInputDialog::getItem(
+        this, tr("Select Image Width"), tr("Width (px):"), options, 0, false, &ok);
+    if (!ok || widthStr.isEmpty()) return;
     int selectedWidth = widthStr.toInt();
 
-    // Resize images to selected width if larger
-    if (image.width() > selectedWidth) {
+    if (image.width() > selectedWidth)
         image = image.scaledToWidth(selectedWidth, Qt::FastTransformation);
-        // qDebug() << "Image resized to width:" << image.width();
-    }
 
-    // Disable updates and signals to prevent repaints and spell checking
     editor->setUpdatesEnabled(false);
     editor->document()->blockSignals(true);
     spellHighlighter->disableSpellChecking();
@@ -297,14 +382,54 @@ void MainWindow::insertImage() {
     imageFormat.setWidth(selectedWidth);
     editor->textCursor().insertImage(imageFormat);
 
-    // Re-enable updates and signals
     editor->document()->blockSignals(false);
     editor->setUpdatesEnabled(true);
     editor->document()->markContentsDirty(0, editor->document()->characterCount());
     spellHighlighter->enableSpellChecking();
+}
 
-    // qDebug() << "Image insertion took:" << timer.elapsed() << "ms";
-    // qDebug() << "Document has" << editor->document()->blockCount() << "blocks and" << editor->document()->characterCount() << "characters";
+void MainWindow::insertDrawing() {
+    DrawingDialog dlg(this, QSize(700, 500));
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    QImage image = dlg.resultImage();
+    if (image.isNull()) return;
+
+    QStringList options;
+    options << "200" << "300" << "400" << "500" << "600" << "700";
+    bool ok;
+    QString widthStr = QInputDialog::getItem(
+        this, tr("Select Drawing Width"), tr("Width in document (px):"), options, 3, false, &ok);
+    if (!ok || widthStr.isEmpty()) return;
+    int selectedWidth = widthStr.toInt();
+
+    if (image.width() > selectedWidth)
+        image = image.scaledToWidth(selectedWidth, Qt::SmoothTransformation);
+
+    editor->setUpdatesEnabled(false);
+    editor->document()->blockSignals(true);
+    spellHighlighter->disableSpellChecking();
+
+    QByteArray ba;
+    QBuffer buffer(&ba);
+    buffer.open(QIODevice::WriteOnly);
+    image.save(&buffer, "PNG");
+    buffer.close();
+
+    QString resourceName =
+        "myimage/drawing_" +
+        QUuid::createUuid().toString(QUuid::Id128).left(8) + ".png";
+    editor->document()->addResource(QTextDocument::ImageResource, QUrl(resourceName), ba);
+
+    QTextImageFormat imageFormat;
+    imageFormat.setName(resourceName);
+    imageFormat.setWidth(selectedWidth);
+    editor->textCursor().insertImage(imageFormat);
+
+    editor->document()->blockSignals(false);
+    editor->setUpdatesEnabled(true);
+    editor->document()->markContentsDirty(0, editor->document()->characterCount());
+    spellHighlighter->enableSpellChecking();
 }
 
 void MainWindow::print() {
@@ -312,14 +437,13 @@ void MainWindow::print() {
     QPrintDialog dialog(&printer, this);
     if (dialog.exec() != QDialog::Accepted) return;
     printer.setPageSize(QPageSize(pageSizeId));
-    printer.setPageMargins(QMarginsF(leftMargin / 72.0, topMargin / 72.0, rightMargin / 72.0, bottomMargin / 72.0), QPageLayout::Inch);
+    printer.setPageMargins(
+        QMarginsF(leftMargin / 72.0, topMargin / 72.0,
+                  rightMargin / 72.0, bottomMargin / 72.0),
+        QPageLayout::Inch);
 
-    // Temporarily disable spell highlighting for printing
     spellHighlighter->disableSpellChecking();
-
     editor->print(&printer);
-
-    // Re-enable spell highlighting
     spellHighlighter->enableSpellChecking();
 }
 
@@ -327,64 +451,65 @@ void MainWindow::pageSetup() {
     QDialog dialog(this);
     dialog.setWindowTitle(tr("Page Setup"));
     QFormLayout *layout = new QFormLayout(&dialog);
+
     QComboBox *pageSizeCombo = new QComboBox(&dialog);
     pageSizeCombo->addItem(tr("Letter (8.5 x 11 in)"), QPageSize::Letter);
     pageSizeCombo->addItem(tr("A4 (210 x 297 mm)"), QPageSize::A4);
     pageSizeCombo->setCurrentIndex(pageSizeCombo->findData(pageSizeId));
-    pageSizeCombo->setToolTip(tr("Select the page size for printing (does not affect editor view width)"));
+    pageSizeCombo->setToolTip(tr("Select the page size for printing"));
     layout->addRow(tr("Page Size:"), pageSizeCombo);
-    QDoubleSpinBox *leftSpin = new QDoubleSpinBox(&dialog);
-    leftSpin->setRange(0.0, 10.0);
-    leftSpin->setSingleStep(0.1);
-    leftSpin->setSuffix(" in");
-    leftSpin->setToolTip(tr("Set the left page margin in inches (visible as padding in the editor)"));
-    leftSpin->setValue(leftMargin / 72.0);
-    layout->addRow(tr("Left Margin:"), leftSpin);
-    QDoubleSpinBox *topSpin = new QDoubleSpinBox(&dialog);
-    topSpin->setRange(0.0, 10.0);
-    topSpin->setSingleStep(0.1);
-    topSpin->setSuffix(" in");
-    topSpin->setToolTip(tr("Set the top page margin in inches (visible as padding at the top of the editor)"));
-    topSpin->setValue(topMargin / 72.0);
-    layout->addRow(tr("Top Margin:"), topSpin);
-    QDoubleSpinBox *rightSpin = new QDoubleSpinBox(&dialog);
-    rightSpin->setRange(0.0, 10.0);
-    rightSpin->setSingleStep(0.1);
-    rightSpin->setSuffix(" in");
-    rightSpin->setToolTip(tr("Set the right page margin in inches (visible as padding in the editor)"));
-    rightSpin->setValue(rightMargin / 72.0);
-    layout->addRow(tr("Right Margin:"), rightSpin);
-    QDoubleSpinBox *bottomSpin = new QDoubleSpinBox(&dialog);
-    bottomSpin->setRange(0.0, 10.0);
-    bottomSpin->setSingleStep(0.1);
-    bottomSpin->setSuffix(" in");
-    bottomSpin->setToolTip(tr("Set the bottom page margin in inches (visible as padding at the bottom of the editor)"));
-    bottomSpin->setValue(bottomMargin / 72.0);
+
+    auto makeSpin = [&](double val, const QString &tip) {
+        QDoubleSpinBox *s = new QDoubleSpinBox(&dialog);
+        s->setRange(0.0, 10.0);
+        s->setSingleStep(0.1);
+        s->setSuffix(" in");
+        s->setToolTip(tip);
+        s->setValue(val);
+        return s;
+    };
+
+    QDoubleSpinBox *leftSpin   = makeSpin(leftMargin   / 72.0, tr("Left margin in inches"));
+    QDoubleSpinBox *topSpin    = makeSpin(topMargin    / 72.0, tr("Top margin in inches"));
+    QDoubleSpinBox *rightSpin  = makeSpin(rightMargin  / 72.0, tr("Right margin in inches"));
+    QDoubleSpinBox *bottomSpin = makeSpin(bottomMargin / 72.0, tr("Bottom margin in inches"));
+    layout->addRow(tr("Left Margin:"),   leftSpin);
+    layout->addRow(tr("Top Margin:"),    topSpin);
+    layout->addRow(tr("Right Margin:"),  rightSpin);
     layout->addRow(tr("Bottom Margin:"), bottomSpin);
-    QDialogButtonBox *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+
+    QDialogButtonBox *buttons = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     layout->addRow(buttons);
+
     if (dialog.exec() == QDialog::Accepted) {
-        pageSizeId = static_cast<QPageSize::PageSizeId>(pageSizeCombo->currentData().toInt());
-        leftMargin = leftSpin->value() * 72.0;
-        topMargin = topSpin->value() * 72.0;
-        rightMargin = rightSpin->value() * 72.0;
+        pageSizeId   = static_cast<QPageSize::PageSizeId>(pageSizeCombo->currentData().toInt());
+        leftMargin   = leftSpin->value()   * 72.0;
+        topMargin    = topSpin->value()    * 72.0;
+        rightMargin  = rightSpin->value()  * 72.0;
         bottomMargin = bottomSpin->value() * 72.0;
         applyPageSetup();
     }
 }
 
 void MainWindow::applyPageSetup() {
-    editor->setMyViewportMargins(qRound(leftMargin), qRound(topMargin), qRound(rightMargin), qRound(bottomMargin));
+    editor->setMyViewportMargins(
+        qRound(leftMargin), qRound(topMargin),
+        qRound(rightMargin), qRound(bottomMargin));
 }
 
 void MainWindow::setLightTheme() {
-    editor->setStyleSheet("QTextEdit { color: black; background-color: white; border: 1px solid #ddd; border-radius: 4px; padding: 0px; }");
+    editor->setStyleSheet(
+        "QTextEdit { color: black; background-color: white; "
+        "border: 1px solid #ddd; border-radius: 4px; padding: 0px; }");
 }
 
 void MainWindow::setDarkTheme() {
-    editor->setStyleSheet("QTextEdit { color: white; background-color: black; border: 1px solid #ddd; border-radius: 4px; padding: 0px; }");
+    editor->setStyleSheet(
+        "QTextEdit { color: white; background-color: black; "
+        "border: 1px solid #ddd; border-radius: 4px; padding: 0px; }");
 }
 
 void MainWindow::exitApp() {
@@ -392,7 +517,5 @@ void MainWindow::exitApp() {
 }
 
 void MainWindow::onDocumentLayoutChanged() {
-    QElapsedTimer timer;
-    timer.start();
-    // qDebug() << "Document layout update took:" << timer.elapsed() << "ms";
+    // qDebug() << "Document layout changed";
 }
