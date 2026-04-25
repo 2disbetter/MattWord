@@ -7,6 +7,10 @@ The executable is under 3 megs, and the whole thing runs in most Linux setups un
 
 <img width="800" height="721" alt="image" src="https://github.com/user-attachments/assets/13bf18d4-7ae1-42aa-aa07-957556d5f919" />
 
+Latest addition adds the ability to insert images that you draw yourelf. 
+
+<img width="633" height="86" alt="image" src="https://github.com/user-attachments/assets/051a761a-6e15-4e87-8cb9-343217cc3dfb" />
+
 MattWord has QT6 for a dependency, and if you want spellchecking, you will need to have aspell and aspell-en installed. This has been tested on Omarchy and Arch Linux. Should work on other distros, provided the dependencies can be met. 
 
 Spellchecking will tell you that a word is misspelled, but will not suggest the fix or new words. This is on purpose and helps to keep things efficient and quick. 
