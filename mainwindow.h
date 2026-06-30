@@ -4,6 +4,8 @@
 #include <QMainWindow>
 #include <QTextEdit>
 #include <QMenuBar>
+#include <QMenu>
+#include <QContextMenuEvent>
 #include <QToolBar>
 #include <QAction>
 #include <QFileDialog>
@@ -24,6 +26,8 @@
 #include <QPageSize>
 #include <QComboBox>
 #include <QHBoxLayout>
+#include <QVBoxLayout>
+#include <QLabel>
 #include <QRegularExpression>
 #include <QUuid>
 #include "spellchecker.h"
@@ -37,11 +41,16 @@ class MyTextEdit : public QTextEdit {
 public:
     MyTextEdit(QWidget *parent = nullptr);
     void setMyViewportMargins(int left, int top, int right, int bottom);
+    void setSpellHighlighter(SpellHighlighter *highlighter) { spellHighlighter = highlighter; }
 
 protected:
     void paintEvent(QPaintEvent *event) override;
     bool viewportEvent(QEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
+    void contextMenuEvent(QContextMenuEvent *event) override;
+
+private:
+    SpellHighlighter *spellHighlighter = nullptr;
 };
 
 class MainWindow : public QMainWindow {
@@ -75,6 +84,7 @@ private slots:
 
 private:
     MyTextEdit *editor;
+    QLabel *titleLabel = nullptr;
     SpellHighlighter *spellHighlighter;
     QString currentFilePath;
 
@@ -87,6 +97,7 @@ private:
 
     void saveToFile(const QString &filePath);
     void applyPageSetup();
+    void updateWindowTitle();
 };
 
 #endif // MAINWINDOW_H

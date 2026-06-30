@@ -5,8 +5,12 @@
 #include <QDebug>
 #include <QMessageBox>
 #include <QElapsedTimer>
+#include <QSettings>
+#include <QStringList>
 
 SpellHighlighter::SpellHighlighter(QTextDocument *parent) : QSyntaxHighlighter(parent) {
+    loadAddedWords();
+
     debounceTimer = new QTimer(this);
     debounceTimer->setSingleShot(true);
     debounceTimer->setInterval(500);
@@ -17,6 +21,10 @@ SpellHighlighter::SpellHighlighter(QTextDocument *parent) : QSyntaxHighlighter(p
     QProcess testAspell;
     testAspell.start("aspell", QStringList() << "-a" << "-l" << "en_US");
     if (!testAspell.waitForStarted(1000)) {
+        // aspell isn't on PATH (the normal case on a stock Windows 11 box).
+        // Disable spell checking entirely so we don't repeatedly try to spawn
+        // a missing process on every edit. The editor still works fully.
+        aspellAvailable = false;
         QMessageBox::warning(nullptr, tr("Spell Check Error"),
             tr("Aspell is not installed or not found in PATH. Spell checking is disabled."));
     } else {
@@ -26,8 +34,11 @@ SpellHighlighter::SpellHighlighter(QTextDocument *parent) : QSyntaxHighlighter(p
         QString output = QString::fromUtf8(testAspell.readAllStandardOutput()).trimmed();
         QString error = QString::fromUtf8(testAspell.readAllStandardError()).trimmed();
         if (output.isEmpty() && !error.isEmpty()) {
+            aspellAvailable = false;
             QMessageBox::warning(nullptr, tr("Spell Check Error"),
                 tr("Aspell dictionary missing: ") + error + tr("\nInstall aspell-en to fix."));
+        } else {
+            aspellAvailable = true;
         }
     }
 }
@@ -109,8 +120,9 @@ void SpellHighlighter::highlightBlock(const QString &text) {
     // Always clear existing formatting
     setFormat(0, plainText.length(), clearFormat);
 
-    // Skip spell-checking if disabled
-    if (!spellCheckingEnabled) {
+    // Skip spell-checking if disabled, or if aspell isn't available at all
+    // (e.g. on Windows without aspell installed)
+    if (!spellCheckingEnabled || !aspellAvailable) {
         // qDebug() << "Spell checking disabled, skipping highlight for block" << currentBlock().blockNumber();
         return;
     }
@@ -120,7 +132,8 @@ void SpellHighlighter::highlightBlock(const QString &text) {
     while (i.hasNext()) {
         QRegularExpressionMatch match = i.next();
         QString word = match.captured();
-        if (word.length() >= 2 && !word.contains(QRegularExpression("[0-9]"))) {
+        if (word.length() >= 2 && !word.contains(QRegularExpression("[0-9]"))
+                && !isWordIgnoredOrAdded(word)) {
             wordsToCheck.append(word);
             wordPositions[word] = {match.capturedStart(), match.capturedLength()};
         }
@@ -145,6 +158,12 @@ void SpellHighlighter::highlightBlock(const QString &text) {
 
 bool SpellHighlighter::isWordMisspelled(const QStringList &words, QHash<QString, bool> &results) {
     if (words.isEmpty()) return false;
+
+    // No aspell -> treat everything as correctly spelled, never spawn a process
+    if (!aspellAvailable) {
+        for (const QString &word : words) results[word] = false;
+        return false;
+    }
 
     QElapsedTimer timer;
     timer.start();
@@ -197,4 +216,49 @@ bool SpellHighlighter::isWordMisspelled(const QStringList &words, QHash<QString,
 
     // qDebug() << "isWordMisspelled for" << words.size() << "words took:" << timer.elapsed() << "ms";
     return true;
+}
+
+// ─── Ignore / custom-dictionary support ─────────────────────────────────────
+
+bool SpellHighlighter::isWordIgnoredOrAdded(const QString &word) const {
+    const QString w = word.toLower();
+    return ignoredWords.contains(w) || addedWords.contains(w);
+}
+
+bool SpellHighlighter::checkMisspelled(const QString &word) {
+    if (word.isEmpty() || !aspellAvailable) return false;
+    if (isWordIgnoredOrAdded(word)) return false;
+
+    QHash<QString, bool> results;
+    QStringList list;
+    list << word;
+    isWordMisspelled(list, results);
+    return results.value(word, false);
+}
+
+void SpellHighlighter::ignoreWord(const QString &word) {
+    if (word.isEmpty()) return;
+    ignoredWords.insert(word.toLower());
+    spellCache.remove(word);
+    rehighlight(); // re-evaluate the whole document so the underline disappears
+}
+
+void SpellHighlighter::addWordToDictionary(const QString &word) {
+    if (word.isEmpty()) return;
+    addedWords.insert(word.toLower());
+    spellCache.remove(word);
+    saveAddedWords();
+    rehighlight();
+}
+
+void SpellHighlighter::loadAddedWords() {
+    QSettings settings;
+    const QStringList words = settings.value("spellcheck/customWords").toStringList();
+    for (const QString &w : words)
+        addedWords.insert(w.toLower());
+}
+
+void SpellHighlighter::saveAddedWords() {
+    QSettings settings;
+    settings.setValue("spellcheck/customWords", QStringList(addedWords.values()));
 }

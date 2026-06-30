@@ -4,6 +4,8 @@
 #include <QTextStream>
 #include <QDir>
 #include <QTextBlock>
+#include <QTextBlockFormat>
+#include <QTextCharFormat>
 #include <QImageReader>
 #include <QBuffer>
 #include <QPageLayout>
@@ -40,7 +42,41 @@ bool MyTextEdit::viewportEvent(QEvent *event) {
 }
 
 void MyTextEdit::keyPressEvent(QKeyEvent *event) {
+    const bool isReturn = (event->key() == Qt::Key_Return ||
+                           event->key() == Qt::Key_Enter);
+
+    // Take explicit control of plain (unmodified) Return/Enter so a single
+    // press always starts exactly one new paragraph. This removes the
+    // double-Enter behaviour, which is caused by inherited paragraph
+    // spacing/margins (e.g. carried over from an opened HTML document) that
+    // can make the first Enter appear to do nothing.
+    //
+    // Shift+Enter is intentionally left to the base class so it still works
+    // as a soft line break within the same paragraph.
+    if (isReturn && !(event->modifiers() & Qt::ShiftModifier)) {
+        QTextCursor cursor = textCursor();
+        cursor.beginEditBlock();
+
+        // Start the new paragraph with normalised spacing
+        QTextBlockFormat blockFmt = cursor.blockFormat();
+        blockFmt.setTopMargin(0);
+        blockFmt.setBottomMargin(0);
+
+        // Don't carry the spell-check underline into the fresh paragraph
+        QTextCharFormat charFmt = cursor.charFormat();
+        charFmt.setUnderlineStyle(QTextCharFormat::NoUnderline);
+
+        cursor.insertBlock(blockFmt, charFmt);
+        cursor.endEditBlock();
+
+        setTextCursor(cursor);
+        ensureCursorVisible();
+        event->accept();
+        return;
+    }
+
     QTextEdit::keyPressEvent(event);
+
     if (event->key() == Qt::Key_Space) {
         QTextBlock block = textCursor().block();
         if (block.isValid()) {
@@ -52,12 +88,61 @@ void MyTextEdit::keyPressEvent(QKeyEvent *event) {
     }
 }
 
+void MyTextEdit::contextMenuEvent(QContextMenuEvent *event) {
+    // Figure out which word was right-clicked
+    QTextCursor cursor = cursorForPosition(event->pos());
+    cursor.select(QTextCursor::WordUnderCursor);
+    const QString word = cursor.selectedText();
+
+    // Start from Qt's normal menu (cut/copy/paste/etc.)
+    QMenu *menu = createStandardContextMenu(event->pos());
+
+    // If that word is currently flagged as misspelled, prepend spell options
+    if (spellHighlighter && !word.isEmpty() && spellHighlighter->checkMisspelled(word)) {
+        QAction *firstAction = menu->actions().isEmpty() ? nullptr : menu->actions().first();
+
+        QAction *ignoreAct = new QAction(tr("Ignore \"%1\"").arg(word), menu);
+        connect(ignoreAct, &QAction::triggered, this, [this, word]() {
+            spellHighlighter->ignoreWord(word);
+        });
+
+        QAction *addAct = new QAction(tr("Add \"%1\" to Dictionary").arg(word), menu);
+        connect(addAct, &QAction::triggered, this, [this, word]() {
+            spellHighlighter->addWordToDictionary(word);
+        });
+
+        menu->insertAction(firstAction, ignoreAct);
+        menu->insertAction(firstAction, addAct);
+        menu->insertSeparator(firstAction);
+    }
+
+    menu->exec(event->globalPos());
+    delete menu;
+}
+
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     editor = new MyTextEdit(this);
     editor->setAcceptRichText(true);
     editor->setAutoFormatting(QTextEdit::AutoNone);
     spellHighlighter = new SpellHighlighter(editor->document());
-    setCentralWidget(editor);
+    editor->setSpellHighlighter(spellHighlighter);
+
+    // In-window document-name bar. The OS title bar is unreliable on many
+    // Linux desktops (it may not render the window title at all), so we show
+    // the current document name in a label directly above the editor.
+    titleLabel = new QLabel(this);
+    titleLabel->setAlignment(Qt::AlignCenter);
+    titleLabel->setStyleSheet(
+        "QLabel { padding: 4px; font-weight: bold; "
+        "background-color: palette(window); }");
+
+    QWidget *container = new QWidget(this);
+    QVBoxLayout *containerLayout = new QVBoxLayout(container);
+    containerLayout->setContentsMargins(0, 0, 0, 0);
+    containerLayout->setSpacing(0);
+    containerLayout->addWidget(titleLabel);
+    containerLayout->addWidget(editor);
+    setCentralWidget(container);
 
     connect(editor->document(), &QTextDocument::documentLayoutChanged, this, &MainWindow::onDocumentLayoutChanged);
 
@@ -132,7 +217,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     toolBar->addAction(imageAct);
     toolBar->addAction(drawingAct);
 
-    setWindowTitle(tr("Qt Rich Text Editor"));
+    updateWindowTitle();
     resize(800, 600);
 
     applyPageSetup();
@@ -144,6 +229,7 @@ MainWindow::~MainWindow() {}
 void MainWindow::newFile() {
     editor->clear();
     currentFilePath.clear();
+    updateWindowTitle();
 }
 
 void MainWindow::openFile() {
@@ -225,6 +311,7 @@ void MainWindow::openFile() {
     spellHighlighter->enableSpellChecking();
 
     currentFilePath = filePath;
+    updateWindowTitle();
 }
 
 void MainWindow::saveFile() {
@@ -241,6 +328,7 @@ void MainWindow::saveAsFile() {
     if (filePath.isEmpty()) return;
     saveToFile(filePath);
     currentFilePath = filePath;
+    updateWindowTitle();
 }
 
 void MainWindow::saveToFile(const QString &filePath) {
@@ -514,6 +602,15 @@ void MainWindow::setDarkTheme() {
 
 void MainWindow::exitApp() {
     qApp->quit();
+}
+
+void MainWindow::updateWindowTitle() {
+    QString name = currentFilePath.isEmpty()
+        ? tr("Untitled")
+        : QFileInfo(currentFilePath).fileName();
+    setWindowTitle(name + tr(" — MattWord"));
+    if (titleLabel)
+        titleLabel->setText(name);
 }
 
 void MainWindow::onDocumentLayoutChanged() {
