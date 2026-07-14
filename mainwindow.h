@@ -6,6 +6,7 @@
 #include <QMenuBar>
 #include <QMenu>
 #include <QContextMenuEvent>
+#include <QMimeData>
 #include <QToolBar>
 #include <QAction>
 #include <QFileDialog>
@@ -48,6 +49,8 @@ protected:
     bool viewportEvent(QEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
     void contextMenuEvent(QContextMenuEvent *event) override;
+    bool canInsertFromMimeData(const QMimeData *source) const override;
+    void insertFromMimeData(const QMimeData *source) override;
 
 private:
     SpellHighlighter *spellHighlighter = nullptr;

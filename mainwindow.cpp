@@ -120,6 +120,66 @@ void MyTextEdit::contextMenuEvent(QContextMenuEvent *event) {
     delete menu;
 }
 
+bool MyTextEdit::canInsertFromMimeData(const QMimeData *source) const {
+    // Accept images in addition to whatever QTextEdit normally accepts
+    return source->hasImage() || QTextEdit::canInsertFromMimeData(source);
+}
+
+void MyTextEdit::insertFromMimeData(const QMimeData *source) {
+    // QTextEdit's default implementation ignores clipboard image data, which
+    // is why pasting a copied picture did nothing. Handle it here.
+    if (source->hasImage()) {
+        QImage image = qvariant_cast<QImage>(source->imageData());
+        if (image.isNull()) {
+            QTextEdit::insertFromMimeData(source);
+            return;
+        }
+
+        // Ask how wide the image should appear, matching the prompt shown by
+        // Insert ▸ Image. Cancelling the dialog cancels the paste.
+        QStringList options;
+        options << "200" << "300" << "400" << "500" << "600";
+        bool ok;
+        QString widthStr = QInputDialog::getItem(
+            this, tr("Select Image Width"), tr("Width (px):"), options, 2, false, &ok);
+        if (!ok || widthStr.isEmpty())
+            return;
+        int selectedWidth = widthStr.toInt();
+
+        // Downscale the stored pixels if they're wider than the chosen width,
+        // same as insertImage() does, so the saved file doesn't carry huge
+        // screenshot-sized data for a small displayed image.
+        if (image.width() > selectedWidth)
+            image = image.scaledToWidth(selectedWidth, Qt::SmoothTransformation);
+
+        // Encode as PNG bytes — same storage form used by Insert Image /
+        // Insert Drawing, so saveToFile() can embed it as a data URI.
+        QByteArray ba;
+        QBuffer buffer(&ba);
+        buffer.open(QIODevice::WriteOnly);
+        image.save(&buffer, "PNG");
+        buffer.close();
+
+        // The "myimage/" prefix matters: the save routine's regex looks for
+        // it when embedding images into the saved HTML.
+        QString resourceName =
+            "myimage/pasted_" +
+            QUuid::createUuid().toString(QUuid::Id128).left(8) + ".png";
+        document()->addResource(QTextDocument::ImageResource,
+                                QUrl(resourceName), ba);
+
+        QTextImageFormat imageFormat;
+        imageFormat.setName(resourceName);
+        imageFormat.setWidth(selectedWidth);
+
+        textCursor().insertImage(imageFormat);
+        ensureCursorVisible();
+        return;
+    }
+
+    QTextEdit::insertFromMimeData(source);
+}
+
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     editor = new MyTextEdit(this);
     editor->setAcceptRichText(true);
