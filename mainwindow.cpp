@@ -1,5 +1,6 @@
 #include "mainwindow.h"
 #include "drawingcanvas.h"
+#include "docxconverter.h"
 #include <QFile>
 #include <QTextStream>
 #include <QDir>
@@ -294,8 +295,51 @@ void MainWindow::newFile() {
 
 void MainWindow::openFile() {
     QString filePath = QFileDialog::getOpenFileName(
-        this, tr("Open File"), "", tr("HTML Files (*.html *.htm);;All Files (*)"));
+        this, tr("Open File"), "",
+        tr("Supported Files (*.html *.htm *.docx);;"
+           "HTML Files (*.html *.htm);;"
+           "Word Documents (*.docx);;All Files (*)"));
     if (filePath.isEmpty()) return;
+
+    // ── .docx: convert to our native HTML representation ─────────────────
+    if (filePath.endsWith(".docx", Qt::CaseInsensitive)) {
+        QString html, error;
+        QHash<QString, QByteArray> images;
+        if (!DocxConverter::importDocx(filePath, html, images, &error)) {
+            QMessageBox::warning(this, tr("Open Failed"), error);
+            return;
+        }
+
+        spellHighlighter->disableSpellChecking();
+        editor->document()->blockSignals(true);
+        editor->setUpdatesEnabled(false);
+
+        editor->setHtml(html);
+        for (auto it = images.constBegin(); it != images.constEnd(); ++it) {
+            editor->document()->addResource(
+                QTextDocument::ImageResource, QUrl(it.key()), it.value());
+        }
+        editor->document()->markContentsDirty(
+            0, editor->document()->characterCount());
+
+        editor->document()->blockSignals(false);
+        editor->setUpdatesEnabled(true);
+        editor->viewport()->update();
+        spellHighlighter->enableSpellChecking();
+
+        currentFilePath = filePath;
+        updateWindowTitle();
+        return;
+    }
+
+    // Legacy binary .doc is intentionally unsupported (see docs): tell the
+    // user instead of showing garbage.
+    if (filePath.endsWith(".doc", Qt::CaseInsensitive)) {
+        QMessageBox::information(this, tr("Unsupported Format"),
+            tr("Legacy .doc files aren't supported. Please convert the file "
+               "to .docx (e.g. in Word or LibreOffice) and open that."));
+        return;
+    }
 
     QFile file(filePath);
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
@@ -383,15 +427,38 @@ void MainWindow::saveFile() {
 }
 
 void MainWindow::saveAsFile() {
+    QString selectedFilter;
     QString filePath = QFileDialog::getSaveFileName(
-        this, tr("Save As"), "", tr("HTML Files (*.html *.htm);;All Files (*)"));
+        this, tr("Save As"), "",
+        tr("HTML Files (*.html *.htm);;Word Document (*.docx);;All Files (*)"),
+        &selectedFilter);
     if (filePath.isEmpty()) return;
+
+    // If the user picked a filter but typed no extension, append the right one
+    if (QFileInfo(filePath).suffix().isEmpty()) {
+        if (selectedFilter.contains("*.docx"))
+            filePath += ".docx";
+        else
+            filePath += ".html";
+    }
+
     saveToFile(filePath);
     currentFilePath = filePath;
     updateWindowTitle();
 }
 
 void MainWindow::saveToFile(const QString &filePath) {
+    // ── .docx export path ────────────────────────────────────────────────
+    if (filePath.endsWith(".docx", Qt::CaseInsensitive)) {
+        QString error;
+        if (!DocxConverter::exportDocx(editor->document(), filePath, &error)) {
+            QMessageBox::warning(this, tr("Save Failed"), error);
+            return;
+        }
+        currentFilePath = filePath;
+        return;
+    }
+
     QFile file(filePath);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
         QMessageBox::warning(this, tr("Error"), tr("Cannot write file %1").arg(filePath));
