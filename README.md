@@ -1,7 +1,7 @@
 # MattWord
 A simple, lightweight, Qt-based document editor and word processor application. 
 
-The point of this application is to be small and lightweight. At this point, most people have used many word processors and document editing applications. We know how they work, and we rarely need all of their functionality. The point of this editor is to simply allow you to create documents, spell check them, insert images, and print them. The documents are saved as an html file. Currently, MattWord only uses this format and does not do any conversion. Conversion is on the road map, though. 
+The point of this application is to be small and lightweight. At this point, most people have used many word processors and document editing applications. We know how they work, and we rarely need all of their functionality. The point of this editor is to simply allow you to create documents, spell check them, insert images, and print them. The documents are saved as either html or docx files. Just note that if you were use MattWord to open a docx file it will work, but any conventions NOT implemented in the MattWord editor will be stripped. 
 
 The executable is under 3 megs, and the whole thing runs in most Linux setups under 100 megs of RAM. This isn't a benchmark that has to be maintained. This is just an indication of where the project is at this point. 
 
